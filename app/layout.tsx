@@ -1,5 +1,8 @@
-// app/layout.tsx
-export const metadata = {
+// app/layout.tsx - root layout
+import type { Metadata } from 'next'
+import './globals.css'
+
+export const metadata: Metadata = {
   title: 'Transcriptor',
   description: 'Solution de transcription audio',
 }
