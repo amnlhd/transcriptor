@@ -82,7 +82,8 @@ export default function TranscriptionApp() {
       const results: string[] = [];
       for (let i = 0; i < chunks.length; i++) {
         const data = await ffmpeg.readFile(chunks[i]);
-        const blob = new Blob([data], { type: 'audio/mpeg' });
+        const blobPart = data instanceof Uint8Array ? data.buffer : data;
+        const blob = new Blob([blobPart as ArrayBuffer], { type: 'audio/mpeg' });
         const text = await transcribeChunk(blob, apiKey, job.language, i);
         results.push(text);
         updateJob(job.id, { progress: Math.round(((i + 1) / chunks.length) * 90) + 5 });
