@@ -1,15 +1,14 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Download, Trash2, FileAudio, CheckCircle, Loader2, AlertCircle, Key, Settings } from 'lucide-react';
 import { saveAs } from 'file-saver';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from 'docx';
 
-const CHUNK_SIZE = 24 * 1024 * 1024; // 24 MB
-
 async function transcribeChunk(chunk: Blob, apiKey: string, language: string, index: number): Promise<string> {
+  const ext = chunk.type.includes('mp4') || chunk.type.includes('m4a') ? 'm4a' : 'mp3';
   const formData = new FormData();
-  formData.append('file', new File([chunk], `chunk_${index}.mp3`, { type: 'audio/mpeg' }));
+  formData.append('file', new File([chunk], `chunk_${index}.${ext}`, { type: chunk.type }));
   formData.append('model', 'whisper-1');
   if (language !== 'auto') formData.append('language', language);
 
@@ -23,9 +22,7 @@ async function transcribeChunk(chunk: Blob, apiKey: string, language: string, in
     const err = await res.json();
     throw new Error(err.error?.message || 'Erreur OpenAI');
   }
-
-  const json = await res.json();
-  return json.text;
+  return (await res.json()).text;
 }
 
 export default function TranscriptionApp() {
@@ -38,6 +35,10 @@ export default function TranscriptionApp() {
     if (stored) setApiKey(stored);
     else setShowKeyModal(true);
   }, []);
+
+  const updateJob = (id: string, updates: any) => {
+    setJobs(prev => prev.map(j => j.id === id ? { ...j, ...updates } : j));
+  };
 
   const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
@@ -52,30 +53,43 @@ export default function TranscriptionApp() {
     setJobs(prev => [...prev, ...newFiles]);
   };
 
-  const updateJob = (id: string, updates: any) => {
-    setJobs(prev => prev.map(j => j.id === id ? { ...j, ...updates } : j));
-  };
-
   const processJob = async (job: any) => {
     try {
       updateJob(job.id, { status: 'transcribing', progress: 5 });
 
-      const file: File = job.file;
-      const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+      const { loadFFmpeg } = await import('@/lib/ffmpeg-worker');
+      const { fetchFile } = await import('@ffmpeg/util');
+      const ffmpeg = await loadFFmpeg();
+
+      const ext = job.file.name.slice(job.file.name.lastIndexOf('.'));
+      const inputName = `input_${job.id}${ext}`;
+      ffmpeg.writeFile(inputName, await fetchFile(job.file));
+
+      await ffmpeg.exec([
+        '-i', inputName,
+        '-f', 'segment',
+        '-segment_time', '600',
+        '-c', 'copy',
+        `chunk_${job.id}_%03d.mp3`
+      ]);
+
+      const files = await ffmpeg.listDir('/');
+      const chunks = files
+        .map((f: any) => f.name)
+        .filter((n: string) => n.startsWith(`chunk_${job.id}_`))
+        .sort();
+
       const results: string[] = [];
-
-      for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, file.size);
-        const chunk = file.slice(start, end);
-
-        const text = await transcribeChunk(chunk, apiKey, job.language, i);
+      for (let i = 0; i < chunks.length; i++) {
+        const data = await ffmpeg.readFile(chunks[i]);
+        const blob = new Blob([data], { type: 'audio/mpeg' });
+        const text = await transcribeChunk(blob, apiKey, job.language, i);
         results.push(text);
-
-        const progress = Math.round(((i + 1) / totalChunks) * 90) + 5;
-        updateJob(job.id, { progress });
+        updateJob(job.id, { progress: Math.round(((i + 1) / chunks.length) * 90) + 5 });
+        await ffmpeg.deleteFile(chunks[i]);
       }
 
+      await ffmpeg.deleteFile(inputName);
       updateJob(job.id, { status: 'done', progress: 100, result: results.join(' ') });
     } catch (err: any) {
       updateJob(job.id, { status: 'error', error: err.message });
@@ -100,6 +114,7 @@ export default function TranscriptionApp() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-4 md:p-8 font-sans">
       <div className="max-w-4xl mx-auto">
+
         <header className="flex justify-between items-center mb-10 bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
           <div>
             <h1 className="text-2xl font-extrabold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
