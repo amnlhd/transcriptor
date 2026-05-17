@@ -5,10 +5,11 @@ import { Download, Trash2, FileAudio, CheckCircle, Loader2, AlertCircle, Key, Se
 import { saveAs } from 'file-saver';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from 'docx';
 
-async function transcribeChunk(chunk: Blob, apiKey: string, language: string, index: number): Promise<string> {
-  const ext = chunk.type.includes('mp4') || chunk.type.includes('m4a') ? 'm4a' : 'mp3';
+const CHUNK_SIZE = 24 * 1024 * 1024; // 24 MB
+
+async function transcribeChunk(chunk: Blob, apiKey: string, language: string, index: number, filename: string): Promise<string> {
   const formData = new FormData();
-  formData.append('file', new File([chunk], `chunk_${index}.${ext}`, { type: chunk.type }));
+  formData.append('file', new File([chunk], filename, { type: chunk.type || 'audio/mpeg' }));
   formData.append('model', 'whisper-1');
   if (language !== 'auto') formData.append('language', language);
 
@@ -20,7 +21,7 @@ async function transcribeChunk(chunk: Blob, apiKey: string, language: string, in
 
   if (!res.ok) {
     const err = await res.json();
-    throw new Error(err.error?.message || 'Erreur OpenAI');
+    throw new Error(err.error?.message || `Erreur OpenAI chunk ${index}`);
   }
   return (await res.json()).text;
 }
@@ -57,40 +58,24 @@ export default function TranscriptionApp() {
     try {
       updateJob(job.id, { status: 'transcribing', progress: 5 });
 
-      const { loadFFmpeg } = await import('@/lib/ffmpeg-worker');
-      const { fetchFile } = await import('@ffmpeg/util');
-      const ffmpeg = await loadFFmpeg();
-
-      const ext = job.file.name.slice(job.file.name.lastIndexOf('.'));
-      const inputName = `input_${job.id}${ext}`;
-      ffmpeg.writeFile(inputName, await fetchFile(job.file));
-
-      await ffmpeg.exec([
-        '-i', inputName,
-        '-f', 'segment',
-        '-segment_time', '600',
-        '-c', 'copy',
-        `chunk_${job.id}_%03d.mp3`
-      ]);
-
-      const files = await ffmpeg.listDir('/');
-      const chunks = files
-        .map((f: any) => f.name)
-        .filter((n: string) => n.startsWith(`chunk_${job.id}_`))
-        .sort();
-
+      const file: File = job.file;
+      const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
       const results: string[] = [];
-      for (let i = 0; i < chunks.length; i++) {
-        const data = await ffmpeg.readFile(chunks[i]);
-        const blobPart = data instanceof Uint8Array ? data.buffer : data;
-        const blob = new Blob([blobPart as ArrayBuffer], { type: 'audio/mpeg' });
-        const text = await transcribeChunk(blob, apiKey, job.language, i);
+      const ext = file.name.slice(file.name.lastIndexOf('.'));
+
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const chunk = file.slice(start, end, file.type);
+        const chunkName = `chunk_${i}${ext}`;
+
+        const text = await transcribeChunk(chunk, apiKey, job.language, i, chunkName);
         results.push(text);
-        updateJob(job.id, { progress: Math.round(((i + 1) / chunks.length) * 90) + 5 });
-        await ffmpeg.deleteFile(chunks[i]);
+
+        const progress = Math.round(((i + 1) / totalChunks) * 90) + 5;
+        updateJob(job.id, { progress });
       }
 
-      await ffmpeg.deleteFile(inputName);
       updateJob(job.id, { status: 'done', progress: 100, result: results.join(' ') });
     } catch (err: any) {
       updateJob(job.id, { status: 'error', error: err.message });
